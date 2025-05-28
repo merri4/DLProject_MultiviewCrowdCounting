@@ -30,7 +30,36 @@ def load_checkpoint(filename, model, optimizer=None):
     return epoch, loss
 
 
-def coords_to_density_map(coords, H, W, sigma=6) :
+def coords_to_density_map_pred(output, H, W, sigma=6, threshold=0.5) :
+
+    output = output.detach().cpu().numpy()
+
+    conf = output[:, :, 2].squeeze(0)       # [N, 1]
+    coords = output[:, :, :2].squeeze(0)    # [N, 2]
+
+    true_coords = []
+    for i,c in enumerate(coords) :
+        if conf[i] > threshold :
+            true_coords.append(c)
+    
+    count = len(true_coords)
+
+    density = np.zeros((H, W), dtype=np.float32)
+    
+    for x, y in true_coords :
+        x_pix = int(np.clip(x, 0, 1) * (W - 1))
+        y_pix = int(np.clip(y, 0, 1) * (H - 1))
+        if 0 <= x_pix < W and 0 <= y_pix < H:
+            density[y_pix, x_pix] = 1
+    
+    density = cv2.GaussianBlur(density, (15, 15), sigma)
+    
+    if density.sum() > 0:
+        density = density * (len(true_coords) / density.sum())
+    
+    return density, count
+
+def coords_to_density_map_gt(coords, H, W, sigma=6) :
     density = np.zeros((H, W), dtype=np.float32)
     for x, y in coords :
         x_pix = int(np.clip(x, 0, 1) * (W - 1))
@@ -48,12 +77,14 @@ def parse_arguments() :
     
     # environmental settings
     parser.add_argument("--data_path", type=str, default='./dataset/')
-    parser.add_argument("--model_path", type=str, default='./output/epoch_1.pth')
+    parser.add_argument("--model_path", type=str, default='./output_rescon/epoch_3.pth')
 
     # hyper-parameters
     parser.add_argument("--train_split_rate", type=float, default=0.8)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--max_people", type=int, default=200)
+
+    parser.add_argument("--threshold", type=float, default=0.6)
 
     args = parser.parse_args()
 
@@ -91,7 +122,6 @@ if __name__ == "__main__" :
     model = MultiviewFusionModel().to(device)
     load_checkpoint(args.model_path, model)
 
-
     # ======================================================
     # 시각화
     # ======================================================
@@ -112,13 +142,12 @@ if __name__ == "__main__" :
         num_people = int(num_people)
         
         with torch.no_grad():
-            pred_coords = model(left_img, right_img)
+            output = model(left_img, right_img)
+        
+        pred_density, pred_count = coords_to_density_map_pred(output, H, W, sigma=6, threshold=args.threshold)
         
         gt = gt_coords[0, :num_people].cpu().numpy()
-        gt_density = coords_to_density_map(gt, H, W, sigma=6)
-        
-        pred = pred_coords[0, :num_people].cpu().numpy()
-        pred_density = coords_to_density_map(pred, H, W, sigma=6)
+        gt_density = coords_to_density_map_gt(gt, H, W, sigma=6)
         
         plt.subplot(n_samples, 2, 2*i+1)
         plt.imshow(gt_density, cmap='jet', origin='lower')
@@ -127,7 +156,7 @@ if __name__ == "__main__" :
 
         plt.subplot(n_samples, 2, 2*i+2)
         plt.imshow(pred_density, cmap='jet', origin='lower')
-        plt.title(f"[{idx}] Pred Density, People: {num_people}")
+        plt.title(f"[{idx}] Pred Density, People: {pred_count}")
         plt.axis('off')
     
     plt.tight_layout()

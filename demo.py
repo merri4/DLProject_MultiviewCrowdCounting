@@ -35,7 +35,7 @@ def coords_to_density_map(output, H, W, sigma=6, threshold=0.5) :
 
     output = output.detach().cpu().numpy()
 
-    conf = output[:, :, 2].squeeze(0) # [N, 1]
+    conf = output[:, :, 2].squeeze(0)       # [N, 1]
     coords = output[:, :, :2].squeeze(0)    # [N, 2]
 
     true_coords = []
@@ -63,18 +63,12 @@ def coords_to_density_map(output, H, W, sigma=6, threshold=0.5) :
 def predict(image1, image2, threshold) :
     
     # 이미지 전처리
-    print(image1.shape)
-    print(image2.shape)
-
     left_img = Image.fromarray(image1).convert('RGB').resize((W, H))
     right_img = Image.fromarray(image2).convert('RGB').resize((W, H))
     
     to_tensor = T.ToTensor()
     left_img = to_tensor(left_img).unsqueeze(0).to(DEVICE)
     right_img = to_tensor(right_img).unsqueeze(0).to(DEVICE)
-
-    print(left_img.shape)
-    print(right_img.shape)
 
     # 모델 feeding
     with torch.no_grad() :
@@ -84,7 +78,7 @@ def predict(image1, image2, threshold) :
 
     density_map = plt.figure()
     ax = density_map.add_subplot(1,1,1)
-    ax.imshow(pred_density, cmap='plasma', origin='lower')
+    ax.imshow(pred_density, cmap='jet', origin='lower')
     ax.set_title(f"Pred Density, People: {count}")
     ax.axis('off')
 
