@@ -12,7 +12,7 @@ import os
 
 import argparse
 
-from model import MultiviewFusionModel, HeadpointCoordDataset
+from model import MultiViewFusionModel, HeadpointCoordDataset
 
 
 def load_checkpoint(filename, model, optimizer=None):  
@@ -48,7 +48,7 @@ def parse_arguments() :
     
     # environmental settings
     parser.add_argument("--data_path", type=str, default='./dataset/')
-    parser.add_argument("--model_path", type=str, default='./output/epoch_1.pth')
+    parser.add_argument("--model_path", type=str, default='./output/epoch_5.pth')
 
     # hyper-parameters
     parser.add_argument("--train_split_rate", type=float, default=0.8)
@@ -88,7 +88,7 @@ if __name__ == "__main__" :
     # Model Prep
     # =========================================================
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MultiviewFusionModel().to(device)
+    model = MultiViewFusionModel().to(device)
     load_checkpoint(args.model_path, model)
 
 

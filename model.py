@@ -7,32 +7,74 @@ from torch.utils.data import Dataset
 import torchvision.transforms as T
 from PIL import Image
 
-class MultiviewFusionModel(nn.Module) :
-    def __init__(self, input_H=256, input_W=256, max_people=200) :
-        super().__init__()
-        self.max_people = max_people
-        self.features = nn.Sequential(
-            nn.Conv2d(6, 32, 3, 1, 1), nn.ReLU(),
-            nn.MaxPool2d(2,2),
-            nn.Conv2d(32, 64, 3, 1, 1), nn.ReLU(),
-            nn.MaxPool2d(2,2),
-            nn.Conv2d(64, 128, 3, 1, 1), nn.ReLU(),
-            nn.MaxPool2d(2,2),
-        )
-        feat_size = input_H//8 * input_W//8 * 128
-        self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(feat_size, 512), nn.ReLU(),
-            nn.Linear(512, self.max_people * 2),
-        )
+import torch
+import torch.nn as nn
+from torchvision.models import convnext_tiny, ConvNeXt_Tiny_Weights
+from timm import create_model
 
+
+class MultiViewFusionModel(nn.Module):
+    def __init__(self, pretrained_backbone=True):
+        super(MultiViewFusionModel, self).__init__()
+        
+        # 1. Backbone: ConvNeXt-Tiny feature extractor (shared for both left and right images)
+        # Load ConvNeXt-Tiny backbone. We remove its classification head to use it as a feature extractor.
+        self.backbone = create_model('convnext_tiny', pretrained=True, features_only=True)
+
+        # 2. Fusion module: simple concatenation + convolution to merge left/right features
+        # We will fuse at an intermediate feature map resolution (after a certain stage of ConvNeXt).
+        # ConvNeXt-Tiny has stages with output dims [96, 192, 384, 768]. We'll fuse after the third stage (dim=384).
+        # The fusion conv will take 384*2 channels (left+right) and output 384 channels.
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(384 * 2, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+        
+        # 3. Upsampling path: increase resolution of fused features for finer localization
+        # We'll upsample the fused 1/16 resolution feature map to 1/8 resolution for prediction.
+        self.upsample_block = nn.Sequential(
+            nn.ConvTranspose2d(384, 192, kernel_size=2, stride=2),  # upsample by 2 (e.g., from 1/16 -> 1/8 scale)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(192, 192, kernel_size=3, padding=1),         # refine with a conv at 1/8 scale
+            nn.ReLU(inplace=True)
+        )
+        
+        # 4. P2PNet-style head: two branches for confidence and coordinate offsets
+        # Confidence head: 1 channel per spatial location (sigmoid will be applied later for probability if needed).
+        self.conf_head = nn.Conv2d(192, 1, kernel_size=1)
+        # Offset head: 2 channels (dx, dy) per spatial location, representing predicted head position offset within the cell.
+        self.offset_head = nn.Conv2d(192, 2, kernel_size=1)
+        
     def forward(self, left_img, right_img) :
-        x = torch.cat([left_img, right_img], dim=1)
-        x = self.features(x)
-        x = self.fc(x)
-        x = torch.sigmoid(x)
-        x = x.view(-1, self.max_people, 2)
-        return x
+        # Extract features from left and right images using the shared ConvNeXt backbone.
+        # We will stop at the intermediate stage (before final downsampling) to get a mid-level feature map.
+        # ConvNeXt forward returns classification logits by default, so we manually run the layers to get feature maps.
+        # We assume the backbone has attributes 'downsample_layers' and 'stages' as in the original ConvNeXt implementation.
+        
+        features_left = self.backbone(left_img)     # List of 4 tensors
+        features_right = self.backbone(right_img)
+
+        feat_left = features_left[2]   # shape [B, 384, 16, 16]
+        feat_right = features_right[2]
+
+        # Now x_left and x_right are the stage-2 feature maps (shape: [B, 384, H/16, W/16]).
+        
+        # Fuse the left and right features by concatenation along channels
+        fused = torch.cat([feat_left, feat_right], dim=1)  # shape: [B, 768, H/16, W/16]
+        fused = self.fusion_conv(fused)             # shape: [B, 384, H/16, W/16]
+        
+        # Upsample to get finer feature map (1/8 resolution) for localization
+        features = self.upsample_block(fused)       # shape: [B, 192, H/8, W/8]
+        
+        # Prediction heads
+        conf_map = self.conf_head(features)         # shape: [B, 1, H/8, W/8], raw confidence (logits)
+        offset_map = self.offset_head(features)     # shape: [B, 2, H/8, W/8], raw offsets
+        
+        # (Optionally, apply sigmoid to conf_map to get probabilities and to offset_map to constrain offsets 0-1)
+        conf_map = torch.sigmoid(conf_map)  # If using as confidence probability in inference
+        offset_map = torch.sigmoid(offset_map)  # If we want offsets normalized between 0 and 1 within each cell
+        
+        return conf_map, offset_map
 
 
 class HeadpointCoordDataset(Dataset) :
