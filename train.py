@@ -7,29 +7,57 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 from scipy.optimize import linear_sum_assignment
+import torch.nn.functional as F
 
 from model import MultiviewFusionModel, HeadpointCoordDataset
 
-def hungarian_loss(pred_coords, gt_coords, num_people):
-    """
-    pred_coords, gt_coords: (B, max_people, 2)
-    num_people: (B,) 실제 사람 수
-    """
-    loss = 0.0
-    batch_size = pred_coords.shape[0]
 
-    for i in range(batch_size) :
+def hungarian_loss_with_confidence(pred_output, gt_coords, num_people, alpha=1.0, beta=1.0):
+    """
+    pred_output: [B, max_people, 3] → x, y, conf
+    gt_coords:   [B, max_people, 2] → normalized coords
+    num_people:  [B] → number of valid GT per image
+    alpha: weight for coordinate loss
+    beta:  weight for confidence loss
+    """
+
+    B, N, _ = pred_output.shape
+    coord_loss = 0.0
+    conf_loss = 0.0
+
+    for i in range(B) :
         n = int(num_people[i])
-        if n == 0 :
-            continue
-        pred = pred_coords[i, :n]  # (n, 2)
-        gt = gt_coords[i, :n]      # (n, 2)
-        cost = torch.cdist(pred, gt, p=2)  # (n, n)  (torch tensor)
-        row_ind, col_ind = linear_sum_assignment(cost.cpu().detach().numpy())
-        pairwise_loss = cost[row_ind, col_ind].sum() / n  # ← torch tensor!
-        loss += pairwise_loss
         
-    return loss / batch_size
+        if n == 0 :
+            # All predictions should be zero confidence
+            pred_conf = pred_output[i, :, 2]
+            conf_loss += F.binary_cross_entropy(pred_conf, torch.zeros_like(pred_conf))
+            continue
+
+        # Prepare predictions and GT
+        pred_coords = pred_output[i, :, :2]  # [N, 2]
+        pred_conf = pred_output[i, :, 2]     # [N]
+        gt = gt_coords[i, :n]                # [n, 2]
+
+        # Compute pairwise distances (cost matrix)
+        cost = torch.cdist(pred_coords, gt, p=2).detach().cpu().numpy()  # [N, n]
+        row_ind, col_ind = linear_sum_assignment(cost)
+
+        # Coordinate loss (only matched)
+        matched_pred = pred_coords[row_ind]
+        matched_gt = gt[col_ind]
+        coord_loss += F.l1_loss(matched_pred, matched_gt, reduction='sum') / n
+
+        # Confidence target: 1 for matched, 0 for others
+        target_conf = torch.zeros_like(pred_conf)
+        target_conf[row_ind] = 1.0
+
+        conf_loss += F.binary_cross_entropy(pred_conf, target_conf)
+
+    coord_loss = coord_loss / B
+    conf_loss = conf_loss / B
+    total_loss = alpha * coord_loss + beta * conf_loss
+    return total_loss
 
 
 def parse_arguments() :
@@ -39,7 +67,7 @@ def parse_arguments() :
     # environmental settings
     parser.add_argument("--seed", type=int, default=821)
     parser.add_argument("--data_path", type=str, default='./dataset/')
-    parser.add_argument("--save_path", type=str, default='./output')
+    parser.add_argument("--save_path", type=str, default='./output_rescon')
     
     # hyper-parameters
     parser.add_argument("--train_split_rate", type=float, default=0.8)
@@ -123,8 +151,8 @@ if __name__ == "__main__" :
                 num_people = num_people.to(device)
                 
                 optimizer.zero_grad()
-                pred_coords = model(left_img, right_img)
-                loss = hungarian_loss(pred_coords, gt_coords, num_people)
+                output = model(left_img, right_img)
+                loss = hungarian_loss_with_confidence(output, gt_coords, num_people)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item()
@@ -139,8 +167,8 @@ if __name__ == "__main__" :
             gt_coords = gt_coords.to(device)
             num_people = num_people.to(device)
 
-            pred_coords = model(left_img, right_img)
-            loss = hungarian_loss(pred_coords, gt_coords, num_people)
+            output = model(left_img, right_img)
+            loss = hungarian_loss_with_confidence(output, gt_coords, num_people)
             test_loss += loss.item()
 
         print(f"Epoch [{epoch+1}/{args.epochs}]\tTrain Loss : {train_loss/len(train_loader):.4f}\tTest Loss : {test_loss/len(test_loader):.4f}")
